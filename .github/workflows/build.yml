@@ -1,0 +1,88 @@
+name: build-and-release
+
+on:
+  push:
+    tags:
+      - 'v*'  # release on tag push, e.g., v0.16.05-hce1
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build static binary (${{ matrix.platform }})
+        run: |
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            -f Dockerfile \
+            --output type=local,dest=./out
+          mkdir -p dist/${GITHUB_REF_NAME}
+          ARCH=$(echo "${{ matrix.platform }}" | cut -d/ -f2)
+          mv out/stress-ng "dist/${GITHUB_REF_NAME}/stress-ng-linux-${ARCH}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.platform }}
+          path: dist/${{ github.ref_name }}/stress-ng-linux-*
+
+  macos:
+    runs-on: macos-13
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          brew install coreutils || true
+          make clean && make -j"$(sysctl -n hw.logicalcpu)"
+          mkdir -p dist/${GITHUB_REF_NAME}
+          cp stress-ng "dist/${GITHUB_REF_NAME}/stress-ng-macos-${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/${{ github.ref_name }}/stress-ng-macos-*
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: bash
+        run: |
+          # Use msys2 or preconfigured env if you maintain one; otherwise you can
+          # ship a prebuilt exe you trust into dist as a stopgap.
+          mkdir -p dist/${GITHUB_REF_NAME}
+          echo "Skipping native build example; place your built exe here"
+          cp scripts/sample-windows-build/stress-ng.exe \
+             "dist/${GITHUB_REF_NAME}/stress-ng-windows-amd64.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64
+          path: dist/${{ github.ref_name }}/stress-ng-windows-amd64.exe
+
+  release:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ./dl
+      - name: Assemble release
+        run: |
+          VER="${GITHUB_REF_NAME}"
+          mkdir -p "dist/${VER}"
+          find dl -type f -name 'stress-ng-*' -exec cp {} "dist/${VER}/" \;
+          (cd "dist/${VER}" && sha256sum stress-ng-* > checksums.txt)
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/${{ github.ref_name }}/*
+          generate_release_notes: true
